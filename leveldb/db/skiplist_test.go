@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"log"
 	"os"
+	"sort"
 	"testing"
 )
 
@@ -110,17 +111,17 @@ func TestContains(t *testing.T) {
 		"x",
 	}
 
-    for _, k := range notExist {
-        if sl.Contains([]byte(k)) {
-            t.Errorf("should not contains %v", k)
-        }
-    }
+	for _, k := range notExist {
+		if sl.Contains([]byte(k)) {
+			t.Errorf("should not contains %v", k)
+		}
+	}
 
-    for k, _ := range kv {
-        if !sl.Contains([]byte(k)) {
-            t.Errorf("should contains %v", k)
-        }
-    }
+	for k, _ := range kv {
+		if !sl.Contains([]byte(k)) {
+			t.Errorf("should contains %v", k)
+		}
+	}
 }
 
 func TestNotExist(t *testing.T) {
@@ -164,6 +165,88 @@ func TestNotExist(t *testing.T) {
 		if !n_is_nil && string(n.key) != lessOrEqual[i] {
 			t.Errorf("findLessOrEqual %v error %v", k, n)
 		}
+	}
+}
+
+func TestIterator(t *testing.T) {
+	keys := make([]string, 0, len(kv))
+	for k, _ := range kv {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	// traverse skiplist
+	it := NewSkiplistIterator(sl)
+	for _, k := range keys {
+		if !it.Valid() {
+			t.Fatalf("Invalid iterator when key = %v", k)
+		}
+
+		log.Printf("key %v\n", string(it.Key()))
+
+		if string(it.Key()) != k {
+			t.Fatalf("Iterator key %v != %v", string(it.Key()), k)
+		}
+
+		it.Next()
+	}
+
+	// seek first
+	it.SeekToFirst()
+	if string(it.Key()) != keys[0] {
+		t.Fatalf("First key %v != %v", string(it.Key()), keys[0])
+	}
+
+	// seek
+	it.Seek([]byte("n"))
+	if string(it.Key()) != keys[len(keys)-1] {
+		t.Fatalf("Seek 'n' key %v != %v", string(it.Key()), keys[len(keys)-1])
+	}
+
+	it.Seek([]byte("z"))
+	if it.Valid() {
+		t.Fatalf("Should be invalid() after Seek 'z'")
+	}
+
+	it.Seek([]byte("a"))
+	if string(it.Key()) != keys[0] {
+		t.Fatalf("Seek 'a' key %v != %v", string(it.Key()), keys[0])
+	}
+
+	// seek last
+	it.SeekToLast()
+	if string(it.Key()) != keys[len(keys)-1] {
+		t.Fatalf("Last key %v != %v", string(it.Key()), keys[len(keys)-1])
+	}
+
+	// reverse traverse skiplist
+	it.SeekToLast()
+	sort.Sort(sort.Reverse(sort.StringSlice(keys)))
+	for _, k := range keys {
+		if !it.Valid() {
+			t.Fatalf("Invalid reverse iterator when key = %v", k)
+		}
+
+		log.Printf("Reverse key %v\n", string(it.Key()))
+
+		if string(it.Key()) != k {
+			t.Fatalf("Reverse iterator key %v != %v", string(it.Key()), k)
+		}
+
+		it.Prev()
+	}
+}
+
+func TestEmptyIterator(t *testing.T) {
+	it := NewSkiplistIterator(nil)
+	if it.Valid() {
+		t.Fatalf("Should be invalid() for nil list")
+	}
+
+	sk := NewSkipList(NewBytewiseComparator())
+	it = NewSkiplistIterator(sk)
+	if it.Valid() {
+		t.Fatalf("Should be invalid() for empty list")
 	}
 }
 

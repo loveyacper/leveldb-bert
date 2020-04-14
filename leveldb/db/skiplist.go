@@ -281,6 +281,33 @@ func (sl *SkipList) findLesser(key []byte) *node {
 	return nil
 }
 
+func (sl *SkipList) first() *node {
+	return sl.head.getNext(0)
+}
+
+func (sl *SkipList) last() *node {
+	level := int(sl.Height())
+	prev := sl.head.getNext(level)
+	for level >= 0 {
+		if prev == nil {
+			return nil
+		}
+		next := prev.getNext(level)
+		for next != nil {
+			prev = next
+			next = next.getNext(level)
+		}
+		if level == 0 {
+			return prev
+		} else {
+			level--
+		}
+	}
+
+	// never reach here
+	return nil
+}
+
 func (sl *SkipList) String() string {
 	if sl == nil {
 		return "SkipList (nil)"
@@ -298,4 +325,68 @@ func (sl *SkipList) String() string {
 	}
 
 	return buf.String()
+}
+
+type SkiplistIterator struct {
+	sklist  *SkipList
+	current *node // point to min value at first
+	state   Status
+}
+
+func NewSkiplistIterator(sk *SkipList) Iterator {
+	it := &SkiplistIterator{sklist: sk}
+	if sk != nil {
+		it.SeekToFirst()
+	}
+
+	return it
+}
+
+func (it *SkiplistIterator) Valid() bool {
+	return it.current != nil
+}
+
+func (it *SkiplistIterator) SeekToFirst() {
+	it.current = it.sklist.first()
+	if it.current != nil {
+		it.state = NewStatus(OK)
+	} else {
+		it.state = NewStatus(IOError, "Empty skiplist")
+	}
+}
+
+func (it *SkiplistIterator) SeekToLast() {
+	it.current = it.sklist.last()
+	if it.current == nil {
+		it.state = NewStatus(IOError, "Empty skiplist")
+	} else {
+		it.state = NewStatus(OK)
+	}
+}
+
+func (it *SkiplistIterator) Seek(target []byte) {
+	ge := sl.findGreatOrEqual(target, nil)
+	it.current = ge
+}
+
+func (it *SkiplistIterator) Next() {
+	next := it.sklist.findGreater(it.current.key)
+	it.current = next
+}
+
+func (it *SkiplistIterator) Prev() {
+	prev := it.sklist.findLesser(it.current.key)
+	it.current = prev
+}
+
+func (it *SkiplistIterator) Key() []byte {
+	return it.current.key
+}
+
+func (it *SkiplistIterator) Value() []byte {
+	return it.current.value
+}
+
+func (it *SkiplistIterator) Status() Status {
+	return it.state
 }
