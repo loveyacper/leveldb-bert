@@ -76,7 +76,7 @@ type SkipList struct {
 	cmp    Comparator
 
 	numNode  int
-	byteSize int // key size + value size
+	byteSize int64 // key size + value size
 }
 
 func NewSkipList(cmp Comparator) *SkipList {
@@ -100,7 +100,7 @@ func (sl *SkipList) NumOfNode() int {
 	return sl.numNode
 }
 
-func (sl *SkipList) ByteSize() int {
+func (sl *SkipList) ByteSize() int64 {
 	return sl.byteSize
 }
 
@@ -170,7 +170,7 @@ func (sl *SkipList) Insert(key, value []byte) error {
 	}
 
 	sl.numNode++
-	sl.byteSize += len(key) + len(value)
+	sl.byteSize += int64(len(key) + len(value))
 	return nil
 }
 
@@ -314,7 +314,7 @@ func (sl *SkipList) String() string {
 	}
 
 	var buf bytes.Buffer
-	buf.WriteString(fmt.Sprintf("\nSkiplist Height: %d,  Num of node %d,  Byte size %d\n", sl.height, sl.numNode, sl.byteSize))
+	buf.WriteString(fmt.Sprintf("\nSkiplist Height: %d,  Num of node %d,  Byte size %v\n", sl.height, sl.numNode, sl.byteSize))
 	for i := sl.height; i >= 0; i-- {
 		buf.WriteString(fmt.Sprintf("Level %d ----------------------------------\n", i))
 		i := int(i)
@@ -365,7 +365,7 @@ func (it *SkiplistIterator) SeekToLast() {
 }
 
 func (it *SkiplistIterator) Seek(target []byte) {
-	ge := sl.findGreatOrEqual(target, nil)
+	ge := it.sklist.findGreatOrEqual(target, nil)
 	it.current = ge
 }
 
