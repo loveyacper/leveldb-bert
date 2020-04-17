@@ -64,11 +64,12 @@ func PutLengthPrefixedSlice(dst *bytes.Buffer, value []byte) {
 	dst.Write(value)
 }
 
-func GetLengthPrefixedSlice(input *bytes.Buffer, result []byte) error {
+func GetLengthPrefixedSlice(input *bytes.Buffer, result *[]byte) error {
 	if l, err := GetVarint32(input); err != nil {
 		return err
 	} else {
-		_, err := input.Read(result[:l])
+		(*result) = make([]byte, l)
+		_, err := input.Read(*result)
 		return err
 	}
 }

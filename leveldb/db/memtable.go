@@ -141,17 +141,15 @@ func (mtbl *MemTable) Get(key *LookupKey, value *[]byte) (bool, Status) {
 			return true, NewStatus(NotFound, string(key.UserKey()))
 		} else if t == uint64(TypeValue) {
 			valBuf := bytes.NewBuffer(node.key[len(mkey):])
-			*value = make([]byte, valBuf.Len())
-			GetLengthPrefixedSlice(valBuf, *value)
-			return true, nil
+			GetLengthPrefixedSlice(valBuf, value)
+			return true, NewStatus(OK)
 		} else {
 			panic(fmt.Sprintf("Wrong type %v when get key %v", t, string(key.UserKey())))
 		}
 	} else if cmp == 0 {
 		valBuf := bytes.NewBuffer(node.key[len(mkey):])
-		*value = make([]byte, valBuf.Len())
-		GetLengthPrefixedSlice(valBuf, *value)
-		return true, nil
+		GetLengthPrefixedSlice(valBuf, value)
+		return true, NewStatus(OK)
 	} else {
 		panic("BUG in skiplist.findGreatOrEqual()")
 	}

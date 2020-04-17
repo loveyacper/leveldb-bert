@@ -59,11 +59,11 @@ func TestAddGet(t *testing.T) {
 		case 0:
 			expect = false
 		case 1, 2:
+			haveState = true
 		case 3, 4:
 			haveState = true
 		default:
 			panic("never here")
-
 		}
 
 		if ok != expect || (st != nil) != haveState {

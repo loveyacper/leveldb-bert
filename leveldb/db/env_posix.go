@@ -152,7 +152,7 @@ func (env *PosixEnv) UnlockFile(lock FileLock) Status {
 		return st
 	}
 
-	env.lockTable.remove(fname)
+	env.lockTable.remove(posixLock.Name())
 	return NewStatus(OK)
 }
 
