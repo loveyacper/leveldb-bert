@@ -212,8 +212,7 @@ func (file *PosixRandomAccessFile) Read(offset int64, n int, scratch []byte) ([]
 		return nil, NewStatus(InvalidArgument, "Buffer too small")
 	}
 
-	l, err := file.File.ReadAt(scratch[:n], offset)
-	if err != nil && err != io.EOF {
+	if l, err := file.File.ReadAt(scratch[:n], offset); err != nil {
 		return nil, NewStatus(IOError, err.Error())
 	} else {
 		return scratch[:l], NewStatus(OK)
