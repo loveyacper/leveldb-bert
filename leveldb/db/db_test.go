@@ -22,7 +22,6 @@ var db *DB
 
 func setup() {
 	log.Println("setup...")
-	db, _ = Open(NewOptions(), "tmpdb")
 }
 
 func teardown() {
@@ -30,6 +29,9 @@ func teardown() {
 }
 
 func TestWrite(t *testing.T) {
+	db, _ = Open(NewOptions(), "tmpdb")
+	defer db.Close()
+
 	wopt := WriteOptions{}
 	ropt := NewReadOptions()
 
@@ -77,6 +79,7 @@ func TestWrite(t *testing.T) {
 
 func TestWriteBatch(t *testing.T) {
 	db, _ = Open(NewOptions(), "tmpdb")
+	defer db.Close()
 
 	wopt := WriteOptions{}
 	ropt := NewReadOptions()
@@ -124,6 +127,62 @@ func TestWriteBatch(t *testing.T) {
 			t.Errorf("Seq %d, err %v", seq, st)
 		} else if st.IsOK() {
 			t.Logf("Find city at seq %d: %v\n", seq, string(value))
+		}
+	}
+}
+
+func TestWriteLog(t *testing.T) {
+	{
+		db, _ = Open(NewOptions(), "tmpdb2")
+
+		var tests = []struct {
+			t     ValueType
+			key   []byte
+			value []byte
+		}{
+			{TypeValue, []byte("city"), []byte("SHANGHAI")},
+			{TypeValue, []byte("city"), []byte("SHENZHEN")},
+			{TypeDeletion, []byte("city"), nil},
+		}
+
+		wopt := WriteOptions{}
+		for _, v := range tests {
+			if v.t == TypeValue {
+				db.Put(&wopt, v.key, v.value)
+			} else if v.t == TypeDeletion {
+				db.Delete(&wopt, v.key)
+			}
+		}
+
+		db.Close()
+	}
+
+	{
+		// read db
+		db, _ = Open(NewOptions(), "tmpdb2")
+		ropt := NewReadOptions()
+
+		// Default db sequence is started at 1
+		t.Logf("Try look up for city at diff version\n")
+		for seq := 1; seq <= 5; seq++ {
+			ropt.Snapshot = SequenceNumber(seq)
+			value, st := db.Get(ropt, []byte("city"))
+
+			succ := true
+			switch seq {
+			case 1, 2:
+				succ = true
+			case 3, 4, 5:
+				succ = false
+			default:
+				panic("never here")
+			}
+
+			if succ != st.IsOK() {
+				t.Errorf("Seq %d, err %v", seq, st)
+			} else if st.IsOK() {
+				t.Logf("Find city at seq %d: %v\n", seq, string(value))
+			}
 		}
 	}
 }

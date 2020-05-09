@@ -89,3 +89,47 @@ func TestFromLogFormat(t *testing.T) {
 	s1 = reader.ReadRecord(&r)
 	t.Logf("read not exist %v\n", s1)
 }
+
+func TestSmallRecord(t *testing.T) {
+	teardown()
+	setup()
+
+	writer.SetCrash(false)
+
+	a := make([]byte, 27)
+	a[0] = 'a'
+	a[26] = 'a'
+	crca := CrcValue(a)
+	writer.AddRecord(a)
+
+	b := make([]byte, 27)
+	b[0] = 'b'
+	b[26] = 'b'
+	crcb := CrcValue(b)
+	writer.AddRecord(b)
+
+	c := make([]byte, 18)
+	c[0] = 'c'
+	c[17] = 'c'
+	crcc := CrcValue(c)
+	writer.AddRecord(c)
+
+	var r []byte
+	s1 := reader.ReadRecord(&r)
+	t.Logf("read a %v, len %d\n", s1, len(r))
+	if !s1 || crca != CrcValue(r) {
+		t.Errorf("read a %v, crc %v vs %v", s1, crca, CrcValue(r))
+	}
+	s1 = reader.ReadRecord(&r)
+	t.Logf("read b %v, len %d\n", s1, len(r))
+	if !s1 || crcb != CrcValue(r) {
+		t.Errorf("read b %v, crc %v vs %v", s1, crcb, CrcValue(r))
+	}
+	s1 = reader.ReadRecord(&r)
+	t.Logf("read c %v, len %d\n", s1, len(r))
+	if !s1 || crcc != CrcValue(r) {
+		t.Errorf("read c %v, crc %v vs %v", s1, crcc, CrcValue(r))
+	}
+	s1 = reader.ReadRecord(&r)
+	t.Logf("read not exist %v\n", s1)
+}

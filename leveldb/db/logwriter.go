@@ -73,6 +73,10 @@ func (lw *LogWriter) SetCrash(crash bool) {
 	lw.crash = crash
 }
 
+func (lw *LogWriter) Sync() Status {
+	return lw.dest.Sync()
+}
+
 func (lw *LogWriter) AddRecord(slice []byte) Status {
 	// Fragment the record if necessary and emit it.  Note that if slice
 	// is empty, we still want to iterate once to emit a single zero-length record

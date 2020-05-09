@@ -98,11 +98,11 @@ func (lr *LogReader) Close() Status {
 }
 
 func (lr *LogReader) readPhysicalRecord() ([]byte, RecordType) {
-	if lr.eof {
-		return nil, eofType
-	}
-
 	if len(lr.record) < logHeaderSize {
+		if lr.eof {
+			return nil, eofType
+		}
+
 		if len(lr.record) > 0 {
 			// Last read was a full read, so this is a trailer to skip
 			log.Printf("skip trailer %v", len(lr.record))
@@ -115,7 +115,7 @@ func (lr *LogReader) readPhysicalRecord() ([]byte, RecordType) {
 			return nil, eofType
 		} else {
 			if len(data) < blockSize {
-				log.Println("eof not enough data...")
+				log.Println("eof... len(data) ", len(data))
 				lr.eof = true
 			}
 

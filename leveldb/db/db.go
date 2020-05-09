@@ -10,19 +10,21 @@ type DB struct {
 	sync.Mutex
 
 	options            *Options
+	name               string
 	mem                *MemTable
 	internalComparator *InternalKeyComparator
 
 	writers    *list.List
 	sequence   SequenceNumber
 	writeBatch *WriteBatch
+
+	lognumber uint64
+	log       *LogWriter
+
+	lock FileLock
 }
 
 func NewDB(opt *Options) *DB {
-	if opt.Env == nil {
-		opt.Env = DefaultEnv()
-	}
-
 	db := &DB{}
 	db.options = opt
 	db.internalComparator = &InternalKeyComparator{opt.Comp}
@@ -33,24 +35,47 @@ func NewDB(opt *Options) *DB {
 }
 
 func Open(opt *Options, dbname string) (*DB, Status) {
-	db := NewDB(opt)
+	if opt.Env == nil {
+		opt.Env = DefaultEnv()
+	}
+
 	opt.Env.CreateDir(dbname)
 
-	// If the file doesn't exist, create it, or append to the file
-	if f, err := os.OpenFile(dbname+"/LOG", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+	// init info logger stuff
+	if f, err := os.OpenFile(InfoLogFileName(dbname), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
 		initLogger(f)
 	} else {
 		initLogger(os.Stdout)
 	}
-	debug.Println("open db ", dbname)
+
+	db := NewDB(opt)
+	if fl, st := opt.Env.LockFile(LockFileName(dbname)); st.IsOK() {
+		db.lock = fl
+	} else {
+		debug.Println(dbname, " is already locked", st)
+		return nil, NewStatus(IOError, dbname+" already locked, maybe some other db instance is working on it")
+	}
+
+	db.mem = NewMemtable(db.internalComparator)
+	db.name = dbname
 
 	db.Lock()
 	defer db.Unlock()
 
-	db.mem = NewMemtable(db.internalComparator)
 	// TODO recover, read wal
+	// logfile number is 1 for temporary
+	db.Recover()
+
+	if lfile, st := opt.Env.NewAppendableFile(LogFileName(dbname, 1)); st.IsOK() {
+		db.lognumber = 1
+		db.log = NewLogWriter(lfile)
+	}
 
 	return db, NewStatus(OK)
+}
+
+func (db *DB) Close() {
+	db.options.Env.UnlockFile(db.lock)
 }
 
 // Set the database entry for "key" to "value".  Returns OK on success,
@@ -90,6 +115,9 @@ func (db *DB) Get(opt *ReadOptions, key []byte) ([]byte, Status) {
 	lk := NewLookupKey(key, snapshot)
 	var value []byte
 	succ, status := db.mem.Get(lk, &value)
+	if status == nil {
+		debug.Fatalln("Get nil status")
+	}
 
 	if succ && status.IsOK() {
 		return value, status
@@ -140,9 +168,13 @@ func (db *DB) Write(opt *WriteOptions, myBatch *WriteBatch) Status {
 		lastSeq += SequenceNumber(updates.Count())
 
 		db.Unlock()
-		// TODO write to wal log
+
+		// write to wal log
+		db.log.AddRecord(updates.Contents())
+		debug.Println("insert record:", len(updates.Contents()))
 		if opt.Sync {
 			// sync to wal log
+			db.log.Sync()
 		}
 		// insert into memtable without db lock
 		mwbp := memtableWriteBatchProcessor{memtable: db.mem}
@@ -238,6 +270,51 @@ func (db *DB) BuildBatchGroup(lastWriter **list.Element, mustNotBeSync bool) *Wr
 	}
 
 	return result
+}
+
+// TODO return *VersionEdit
+func (db *DB) Recover() (*DB, Status) {
+	// or init db
+	// version.Recover
+	// recover Logfile to memtable
+	s := NewStatus(OK)
+
+	if db.options.Env.FileExists(CurrentFileName(db.name)) {
+		if db.options.ErrorIfExists {
+			return nil, NewStatus(InvalidArgument, db.name+" exists (error_if_exists is true)")
+		}
+	} else {
+		if db.options.CreateIfMissing {
+			s = initDB(db.options.Env, db.name)
+		} else {
+			//return nil, NewStatus(InvalidArgument, db.name + " does not exist (create_if_missing is false)")
+		}
+	}
+
+	// recovery logfile
+	{
+		if logf, st := db.options.Env.NewSequentialFile(LogFileName(db.name, 1)); st.IsOK() {
+			reader := NewLogReader(logf)
+			var record []byte
+			for reader.ReadRecord(&record) {
+				debug.Println("got record:", len(record))
+				wb := NewWriteBatch()
+				wb.SetContents(record)
+				// insert into memtable without db lock
+				mwbp := memtableWriteBatchProcessor{memtable: db.mem}
+				wb.ForEach(&mwbp)
+			}
+			debug.Println("recover logfile done:", LogFileName(db.name, 1))
+			reader.Close()
+		}
+	}
+
+	return nil, s
+}
+
+// TODO
+func initDB(env Env, dbname string) Status {
+	return NewStatus(OK)
 }
 
 type memtableWriteBatchProcessor struct {
