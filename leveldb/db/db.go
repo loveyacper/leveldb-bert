@@ -2,6 +2,7 @@ package leveldb
 
 import (
 	"container/list"
+	"os"
 	"sync"
 )
 
@@ -33,6 +34,15 @@ func NewDB(opt *Options) *DB {
 
 func Open(opt *Options, dbname string) (*DB, Status) {
 	db := NewDB(opt)
+	opt.Env.CreateDir(dbname)
+
+	// If the file doesn't exist, create it, or append to the file
+	if f, err := os.OpenFile(dbname+"/LOG", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
+		initLogger(f)
+	} else {
+		initLogger(os.Stdout)
+	}
+	debug.Println("open db ", dbname)
 
 	db.Lock()
 	defer db.Unlock()
@@ -81,7 +91,7 @@ func (db *DB) Get(opt *ReadOptions, key []byte) ([]byte, Status) {
 	var value []byte
 	succ, status := db.mem.Get(lk, &value)
 
-	if succ && status == nil {
+	if succ && status.IsOK() {
 		return value, status
 	} else {
 		return nil, status
@@ -135,8 +145,8 @@ func (db *DB) Write(opt *WriteOptions, myBatch *WriteBatch) Status {
 			// sync to wal log
 		}
 		// insert into memtable without db lock
-		mwbp := newMemtableWriteBatchProcessor(db.mem)
-		updates.ForEach(mwbp)
+		mwbp := memtableWriteBatchProcessor{memtable: db.mem}
+		updates.ForEach(&mwbp)
 
 		db.Lock()
 
@@ -178,7 +188,7 @@ func (db *DB) Write(opt *WriteOptions, myBatch *WriteBatch) Status {
 // REQUIRES: First writer must have a non-null batch
 func (db *DB) BuildBatchGroup(lastWriter **list.Element, mustNotBeSync bool) *WriteBatch {
 	if db.writers.Len() == 0 {
-		panic("why writers are empty")
+		debug.Panic("why writers are empty")
 	}
 
 	first := db.writers.Front()
@@ -216,7 +226,7 @@ func (db *DB) BuildBatchGroup(lastWriter **list.Element, mustNotBeSync bool) *Wr
 			if result == firstWriter.batch {
 				result = db.writeBatch
 				if result.Count() != 0 {
-					panic("db.writeBatch.Count should be zero")
+					debug.Panicln("Should be zero, wrong db.writeBatch.Count ", result.Count())
 				}
 				result.Append(firstWriter.batch)
 			}
@@ -232,10 +242,6 @@ func (db *DB) BuildBatchGroup(lastWriter **list.Element, mustNotBeSync bool) *Wr
 
 type memtableWriteBatchProcessor struct {
 	memtable *MemTable
-}
-
-func newMemtableWriteBatchProcessor(tbl *MemTable) *memtableWriteBatchProcessor {
-	return &memtableWriteBatchProcessor{memtable: tbl}
 }
 
 func (wbp *memtableWriteBatchProcessor) ProcessWriteBatch(seq SequenceNumber, tp ValueType, key, value []byte) {
