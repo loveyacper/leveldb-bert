@@ -84,3 +84,10 @@ func NewOptions() *Options {
 
 	return opt
 }
+
+func NewCreateIfMissingOptions() *Options {
+	opt := NewOptions()
+	opt.CreateIfMissing = true
+
+	return opt
+}

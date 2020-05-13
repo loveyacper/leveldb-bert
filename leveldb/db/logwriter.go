@@ -142,7 +142,7 @@ func (lw *LogWriter) emitPhysicalRecord(tp RecordType, data []byte) Status {
 	// put crc to header[:4]
 	{
 		crc := levelDbCrc(lw.typeCrc[tp])
-		crc = crc.Extend(data)
+		crc = crc.Extend(data).Mask()
 		binary.LittleEndian.PutUint32(header[:4], uint32(crc))
 	}
 

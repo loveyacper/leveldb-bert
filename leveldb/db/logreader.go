@@ -72,9 +72,7 @@ func (lr *LogReader) ReadRecord(record *[]byte) bool {
 			*record = rec // shallow copy
 			return true
 		case firstType:
-			if record != nil {
-				*record = make([]byte, 0, 64)
-			}
+			*record = make([]byte, 0, blockSize) // reset record
 			*record = append(*record, rec...)
 		case middleType:
 			*record = append(*record, rec...)
@@ -145,9 +143,9 @@ func (lr *LogReader) readPhysicalRecord() ([]byte, RecordType) {
 	tp := RecordType(lr.record[6])
 	if lr.checkCrc {
 		crc := binary.LittleEndian.Uint32(lr.record[:4])
-		realCrc := levelDbCrc(lr.typeCrc[tp])
-		realCrc = realCrc.Extend(lr.record[logHeaderSize : logHeaderSize+dataLen])
-		if crc != uint32(realCrc) {
+		expectCrc := levelDbCrc(lr.typeCrc[tp])
+		expectCrc = expectCrc.Extend(lr.record[logHeaderSize : logHeaderSize+dataLen]).Mask()
+		if crc != uint32(expectCrc) {
 			return nil, badRecordType
 		}
 	}

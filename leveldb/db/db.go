@@ -285,9 +285,9 @@ func (db *DB) Recover() (*DB, Status) {
 		}
 	} else {
 		if db.options.CreateIfMissing {
-			s = initDB(db.options.Env, db.name)
+			s = db.initDB(db.options.Env, db.name)
 		} else {
-			//return nil, NewStatus(InvalidArgument, db.name + " does not exist (create_if_missing is false)")
+			return nil, NewStatus(InvalidArgument, db.name+" does not exist (create_if_missing is false)")
 		}
 	}
 
@@ -312,9 +312,41 @@ func (db *DB) Recover() (*DB, Status) {
 	return nil, s
 }
 
-// TODO
-func initDB(env Env, dbname string) Status {
-	return NewStatus(OK)
+func (db *DB) initDB(env Env, dbname string) Status {
+	s := NewStatus(OK)
+
+	var edit VersionEdit
+	edit.SetComparatorName(db.internalComparator.userCmp.Name()) // leveldb.InternalKeyComparator
+	edit.SetLogNumber(0)
+	edit.SetNextFile(2) // The first file is MANIFEST-1
+	edit.SetLastSequence(0)
+
+	// manifest = dbname/MANIFEST-1
+	var wfile WritableFile
+	manifest := DescriptorFileName(db.name, 1)
+	if wfile, s = db.options.Env.NewWritableFile(manifest); !s.IsOK() {
+		return s
+	}
+
+	// write edit to MANIFEST-1
+	logWriter := NewLogWriter(wfile)
+	s = logWriter.AddRecord(edit.Encode())
+	if s.IsOK() {
+		s = logWriter.Close()
+	}
+
+	if s.IsOK() {
+		// Make "CURRENT" file that points to the new manifest file.
+		if err := SetCurrentFile(db.name, 1); err != nil {
+			s = NewStatus(IOError, err.Error())
+		} else {
+			debug.Println("SetCurrentFile to ", manifest)
+		}
+	} else {
+		db.options.Env.RemoveFile(manifest)
+	}
+
+	return s
 }
 
 type memtableWriteBatchProcessor struct {

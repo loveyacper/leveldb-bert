@@ -29,7 +29,7 @@ func teardown() {
 }
 
 func TestWrite(t *testing.T) {
-	db, _ = Open(NewOptions(), "tmpdb")
+	db, _ = Open(NewCreateIfMissingOptions(), "tmpdb")
 	defer db.Close()
 
 	wopt := WriteOptions{}
@@ -78,7 +78,7 @@ func TestWrite(t *testing.T) {
 }
 
 func TestWriteBatch(t *testing.T) {
-	db, _ = Open(NewOptions(), "tmpdb")
+	db, _ = Open(NewCreateIfMissingOptions(), "tmpdb")
 	defer db.Close()
 
 	wopt := WriteOptions{}
@@ -133,7 +133,7 @@ func TestWriteBatch(t *testing.T) {
 
 func TestWriteLog(t *testing.T) {
 	{
-		db, _ = Open(NewOptions(), "tmpdb2")
+		db, _ = Open(NewCreateIfMissingOptions(), "tmpdb2")
 
 		var tests = []struct {
 			t     ValueType
