@@ -156,3 +156,73 @@ func (mtbl *MemTable) Get(key *LookupKey, value *[]byte) (bool, Status) {
 
 	return false, nil
 }
+
+type MemTableIterator struct {
+	iter Iterator      // SkiplistIterator
+	tmp  *bytes.Buffer // For passing to EncodeKey
+}
+
+func NewMemTableIterator(mtable *MemTable) Iterator {
+	miter := &MemTableIterator{}
+	miter.iter = NewSkiplistIterator(mtable.table)
+	miter.tmp = bytes.NewBuffer(nil)
+
+	return miter
+}
+
+func (mit *MemTableIterator) Valid() bool {
+	return mit.iter.Valid()
+}
+
+func (mit *MemTableIterator) Seek(target []byte) {
+	mit.tmp.Reset()
+	PutLengthPrefixedSlice(mit.tmp, target)
+
+	mit.iter.Seek(mit.tmp.Bytes())
+}
+
+func (mit *MemTableIterator) SeekToFirst() {
+	mit.iter.SeekToFirst()
+}
+
+func (mit *MemTableIterator) SeekToLast() {
+	mit.iter.SeekToLast()
+}
+
+func (mit *MemTableIterator) Next() {
+	mit.iter.Next()
+}
+
+func (mit *MemTableIterator) Prev() {
+	mit.iter.Prev()
+}
+
+func (mit *MemTableIterator) Key() []byte {
+	buf := bytes.NewBuffer(mit.iter.Key()) // buf: keylen+8 | key content | seq+type | val len | value
+	var key []byte
+	if err := GetLengthPrefixedSlice(buf, &key); err != nil {
+		panic(err.Error())
+	}
+
+	return key // key content + seq-type
+}
+
+func (mit *MemTableIterator) Value() []byte {
+	buf := bytes.NewBuffer(mit.iter.Key()) // buf: keylen+8 | key content | seq+type | val len | value
+	if klen, err := GetVarint32(buf); err != nil {
+		panic(err.Error())
+	} else {
+		buf.Next(int(klen))
+	}
+
+	var value []byte
+	if err := GetLengthPrefixedSlice(buf, &value); err != nil {
+		panic(err.Error())
+	}
+
+	return value
+}
+
+func (mit *MemTableIterator) Status() Status {
+	return mit.iter.Status()
+}

@@ -46,6 +46,7 @@ func (icmp *InternalKeyComparator) Name() string {
 	return "leveldb.InternalKeyComparator"
 }
 
+// key1, key2 is InternalKey
 func (icmp *InternalKeyComparator) Compare(key1, key2 []byte) int {
 	ukey1 := ExtractUserKey(key1)
 	ukey2 := ExtractUserKey(key2)
@@ -72,12 +73,84 @@ func (icmp *InternalKeyComparator) Compare(key1, key2 []byte) int {
 
 func (icmp *InternalKeyComparator) FindShortestSeparator(start *[]byte, limit string) {
 	// Needed when construct ldb file
-	panic("FindShortestSeparator not implemented")
+	// Attempt to shorten the user portion of the key
+	userStart := ExtractUserKey(*start)
+	userLimit := ExtractUserKey([]byte(limit))
+
+	tmp := make([]byte, len(*start))
+	copy(tmp, userStart)
+	icmp.userCmp.FindShortestSeparator(&tmp, string(userLimit))
+
+	if len(tmp) < len(userStart) && icmp.userCmp.Compare(userStart, tmp) < 0 {
+		// User key has become shorter physically, but larger logically.
+		// Tack on the earliest possible number to the shortened user key.
+		buf := bytes.NewBuffer(tmp)
+		PutFixed64(buf, packSequenceAndType(kMaxSequenceNumber, TypeValueForSeek))
+		tmp = buf.Bytes()
+
+		if icmp.Compare(*start, tmp) >= 0 || icmp.Compare(tmp, []byte(limit)) >= 0 {
+			panic("BUG")
+		}
+
+		*start = tmp
+	}
 }
 
 func (icmp *InternalKeyComparator) FindShortSuccessor(key *[]byte) {
 	// Needed when construct ldb file
-	panic("FindShortSuccessor not implemented")
+	userKey := ExtractUserKey(*key)
+
+	tmp := make([]byte, len(*key))
+	copy(tmp, userKey)
+	icmp.userCmp.FindShortSuccessor(&tmp)
+	if len(tmp) < len(userKey) && icmp.userCmp.Compare(userKey, tmp) < 0 {
+		// User key has become shorter physically, but larger logically.
+		// Tack on the earliest possible number to the shortened user key.
+		buf := bytes.NewBuffer(tmp)
+		PutFixed64(buf, packSequenceAndType(kMaxSequenceNumber, TypeValueForSeek))
+		tmp = buf.Bytes()
+
+		if icmp.Compare(*key, tmp) >= 0 {
+			panic("BUG")
+		}
+
+		*key = tmp
+	}
+}
+
+// Modules in this directory should keep internal keys wrapped inside
+// the following class instead of plain strings so that we do not
+// incorrectly use string comparisons instead of an InternalKeyComparator.
+type InternalKey struct {
+	rep []byte
+}
+
+func NewInternalKey(userKey []byte, s SequenceNumber, t ValueType) *InternalKey {
+	key := ParsedInternalKey{}
+	key.userKey = userKey
+	key.sequence = s
+	key.tp = t
+
+	ikey := &InternalKey{}
+	ikey.rep = AppendInternalKey(key)
+	return ikey
+}
+
+func (ikey *InternalKey) DecodeFrom(s []byte) {
+	//ikey.rep = s
+	copy(ikey.rep, s)
+}
+
+func (ikey *InternalKey) Encode() []byte {
+	return ikey.rep
+}
+
+func (ikey *InternalKey) UserKey() []byte {
+	return ExtractUserKey(ikey.rep)
+}
+
+func (ikey *InternalKey) Clear() {
+	ikey.rep = ikey.rep[0:0]
 }
 
 // Returns the user key portion of an internal key.
@@ -97,6 +170,29 @@ func packSequenceAndType(seq SequenceNumber, t ValueType) uint64 {
 	s64 := uint64(seq)
 	t64 := uint64(t)
 	return (s64 << 8) | t64
+}
+
+type ParsedInternalKey struct {
+	userKey  []byte
+	sequence SequenceNumber
+	tp       ValueType
+}
+
+func NewParsedInternalKey(userKey []byte, seq SequenceNumber, t ValueType) ParsedInternalKey {
+	pikey := ParsedInternalKey{}
+	pikey.userKey = userKey
+	pikey.sequence = seq
+	pikey.tp = t
+
+	return pikey
+}
+
+func AppendInternalKey(key ParsedInternalKey) []byte {
+	buf := bytes.NewBuffer(nil)
+	buf.Write(key.userKey)
+	PutFixed64(buf, packSequenceAndType(key.sequence, key.tp))
+
+	return buf.Bytes()
 }
 
 // A helper class useful for DB::Get()

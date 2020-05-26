@@ -342,7 +342,9 @@ func (db *DB) initDB(env Env, dbname string) Status {
 		} else {
 			debug.Println("SetCurrentFile to ", manifest)
 		}
-	} else {
+	}
+
+	if !s.IsOK() {
 		db.options.Env.RemoveFile(manifest)
 	}
 
