@@ -19,8 +19,6 @@ func TestMain(m *testing.M) {
 }
 
 var bloom FilterPolicy
-var filter []byte
-var keys [][]byte
 
 func setup() {
 	initLogger(os.Stdout)
@@ -171,10 +169,10 @@ func TestMultiChunk(t *testing.T) {
 	if !fbr.KeyMayMatch(9000, []byte("hello")) {
 		t.Errorf("should report match")
 	}
-	if fbr.KeyMayMatch(6100, []byte("foo")) {
+	if fbr.KeyMayMatch(9000, []byte("foo")) {
 		t.Errorf("should report NOT match")
 	}
-	if fbr.KeyMayMatch(6100, []byte("bar")) {
+	if fbr.KeyMayMatch(9000, []byte("bar")) {
 		t.Errorf("should report NOT match")
 	}
 }

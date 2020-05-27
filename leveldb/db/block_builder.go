@@ -75,7 +75,7 @@ func (bb *BlockBuilder) Add(key, value []byte) {
 		bb.restartLen = 0
 	} else {
 		for i := 0; i < len(bb.lastKey) && i < len(key); i++ {
-			if bb[i] != key[i] {
+			if bb.lastKey[i] != key[i] {
 				break
 			}
 			shared++
@@ -98,7 +98,12 @@ func (bb *BlockBuilder) Add(key, value []byte) {
 }
 
 func (bb *BlockBuilder) CurrentSizeEstimate() int {
-	return len(bb.data) + len(bb.restarts)*unsafe.Sizeof(int32) + unsafe.Sizeof(int32)
+	intsize := int(unsafe.Sizeof(bb.restarts[0]))
+	return len(bb.data) + len(bb.restarts)*intsize + intsize
+}
+
+func (bb *BlockBuilder) Empty() bool {
+	return len(bb.data) == 0
 }
 
 func (bb *BlockBuilder) Finish() []byte {
