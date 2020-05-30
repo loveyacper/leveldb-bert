@@ -7,7 +7,6 @@ package leveldb
 import (
 	"encoding/binary"
 	"fmt"
-	"log"
 )
 
 type RecordType byte
@@ -89,7 +88,7 @@ func (lw *LogWriter) AddRecord(slice []byte) Status {
 			panic(fmt.Sprintf("leftover %d", leftover))
 		}
 		if leftover < logHeaderSize {
-			log.Printf("add trailer %d bytes\n", leftover)
+			debug.Printf("add trailer %d bytes\n", leftover)
 			lw.dest.Append(trailer[:leftover])
 			lw.blockOffset = 0
 		}
@@ -116,7 +115,7 @@ func (lw *LogWriter) AddRecord(slice []byte) Status {
 			tp = middleType
 		}
 
-		log.Printf("AddRecord fragmentLength %d, len(data) %d, begin %v, end %v\n", fragmentLength, len(data), begin, end)
+		debug.Printf("AddRecord fragmentLength %d, len(data) %d, begin %v, end %v\n", fragmentLength, len(data), begin, end)
 		s = lw.emitPhysicalRecord(tp, data[:fragmentLength])
 		data = data[fragmentLength:]
 		begin = false

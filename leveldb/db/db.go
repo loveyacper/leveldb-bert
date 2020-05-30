@@ -3,6 +3,7 @@ package leveldb
 import (
 	"container/list"
 	"os"
+	"sort"
 	"sync"
 )
 
@@ -20,6 +21,8 @@ type DB struct {
 
 	lognumber uint64
 	log       *LogWriter
+
+	versions *VersionSet
 
 	lock FileLock
 }
@@ -58,12 +61,11 @@ func Open(opt *Options, dbname string) (*DB, Status) {
 
 	db.mem = NewMemtable(db.internalComparator)
 	db.name = dbname
+	db.versions = NewVersionSet(dbname, opt, db.internalComparator)
 
 	db.Lock()
 	defer db.Unlock()
 
-	// TODO recover, read wal
-	// logfile number is 1 for temporary
 	db.Recover()
 
 	if lfile, st := opt.Env.NewAppendableFile(LogFileName(dbname, 1)); st.IsOK() {
@@ -272,44 +274,92 @@ func (db *DB) BuildBatchGroup(lastWriter **list.Element, mustNotBeSync bool) *Wr
 	return result
 }
 
-// TODO return *VersionEdit
-func (db *DB) Recover() (*DB, Status) {
-	// or init db
-	// version.Recover
-	// recover Logfile to memtable
+func (db *DB) Recover() Status {
 	s := NewStatus(OK)
 
 	if db.options.Env.FileExists(CurrentFileName(db.name)) {
 		if db.options.ErrorIfExists {
-			return nil, NewStatus(InvalidArgument, db.name+" exists (error_if_exists is true)")
+			return NewStatus(InvalidArgument, db.name+" exists (error_if_exists is true)")
 		}
 	} else {
 		if db.options.CreateIfMissing {
-			s = db.initDB(db.options.Env, db.name)
-		} else {
-			return nil, NewStatus(InvalidArgument, db.name+" does not exist (create_if_missing is false)")
-		}
-	}
-
-	// recovery logfile
-	{
-		if logf, st := db.options.Env.NewSequentialFile(LogFileName(db.name, 1)); st.IsOK() {
-			reader := NewLogReader(logf)
-			var record []byte
-			for reader.ReadRecord(&record) {
-				debug.Println("got record:", len(record))
-				wb := NewWriteBatch()
-				wb.SetContents(record)
-				// insert into memtable without db lock
-				mwbp := memtableWriteBatchProcessor{memtable: db.mem}
-				wb.ForEach(&mwbp)
+			if s = db.initDB(db.options.Env, db.name); !s.IsOK() {
+				return s
 			}
-			debug.Println("recover logfile done:", LogFileName(db.name, 1))
-			reader.Close()
+		} else {
+			return NewStatus(InvalidArgument, db.name+" does not exist (create_if_missing is false)")
 		}
 	}
 
-	return nil, s
+	// 访问manifest，记录当前lognumber，next file号。并将当前manifest号码设置为next++
+	s = db.versions.Recover()
+
+	// 下面db则尝试根据lognumber，恢复有效的wal。leveldb恢复完成后，强制生成了ldb文件
+	// 这里我不打算生成ldb，想复用已有的wal文件。当后续接受put请求，再触发minor压缩
+	// 所以这里我不需要更新edit,leveldb更新edit，是因为新增了ldb文件，且淘汰响应的wal.log文件
+	if s.IsOK() {
+		var maxSeq SequenceNumber
+
+		// Recover from all newer log files than the ones named in the
+		// descriptor (new log files may have been added by the previous
+		// incarnation without registering them in the descriptor).
+		minLog := db.versions.LogNumber()
+		filenames, st := db.options.Env.GetChildren(db.name)
+		if !st.IsOK() {
+			return st
+		}
+
+		logs := make([]uint64, 0)
+		for _, name := range filenames {
+			if ok, number, tp := ParseFileName(name); ok {
+				if tp == LogFile && number >= minLog {
+					logs = append(logs, number)
+				}
+			}
+		}
+
+		sort.Slice(logs, func(i, j int) bool {
+			return logs[i] < logs[j]
+		})
+
+		for _, n := range logs {
+			seq := db.recoverLog(n)
+			if seq > maxSeq {
+				maxSeq = seq
+			}
+
+			// The previous incarnation may not have written any MANIFEST
+			// records after allocating this log number.  So we manually
+			// update the file number allocation counter in VersionSet.
+			db.versions.MarkFileNumberUsed(n)
+		}
+
+		if maxSeq > db.versions.LastSequence() {
+			db.versions.SetLastSequence(maxSeq)
+		}
+	}
+
+	return s
+}
+
+func (db *DB) recoverLog(num uint64) SequenceNumber {
+	var maxSeq SequenceNumber
+	if logf, st := db.options.Env.NewSequentialFile(LogFileName(db.name, num)); st.IsOK() {
+		reader := NewLogReader(logf)
+		var record []byte
+		for reader.ReadRecord(&record) {
+			debug.Println("got record:", len(record))
+			wb := NewWriteBatch()
+			wb.SetContents(record)
+			// insert into memtable without db lock
+			mwbp := memtableWriteBatchProcessor{memtable: db.mem}
+			wb.ForEach(&mwbp)
+		}
+		debug.Println("recover logfile done:", LogFileName(db.name, num))
+		reader.Close()
+	}
+
+	return maxSeq
 }
 
 func (db *DB) initDB(env Env, dbname string) Status {

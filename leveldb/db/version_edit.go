@@ -6,9 +6,18 @@ package leveldb
 
 import (
 	"bytes"
+	"fmt"
 )
 
 type FileMetaData struct {
+	//  AllowedSeeks; // Seeks allowed until compaction
+	//allowed_seeks(1 << 30)
+
+	Number   uint64
+	FileSize uint64
+
+	//Smallest InternalKey
+	//Largest InternalKey
 }
 
 type VersionEdit struct {
@@ -56,10 +65,10 @@ func (ve *VersionEdit) Clear() {
 	ve.HasLastSequence = false
 }
 
-type filedTag int
+type fieldTag int
 
 const (
-	comparator filedTag = 1 + iota
+	comparator fieldTag = 1 + iota
 	logNumber
 	nextFileNumber
 	lastSequence
@@ -90,6 +99,47 @@ func (ve *VersionEdit) Encode() []byte {
 	return dst.Bytes()
 }
 
-func (ve *VersionEdit) Decode(src string) Status {
-	return NewStatus(OK)
+func (ve *VersionEdit) Decode(input []byte) Status {
+	ve.Clear()
+
+	st := NewStatus(OK)
+	src := bytes.NewBuffer(input)
+	for st.IsOK() {
+		if tp, err := GetVarint32(src); err != nil {
+			break
+		} else {
+			debug.Println("got type ", tp)
+			switch fieldTag(tp) {
+			case comparator:
+				var cmp []byte
+				if err := GetLengthPrefixedSlice(src, &cmp); err != nil {
+					st = NewStatus(IOError, err.Error())
+				} else {
+					ve.SetComparatorName(string(cmp))
+				}
+			case logNumber:
+				if n, err := GetVarint64(src); err != nil {
+					st = NewStatus(IOError, "logNumber", err.Error())
+				} else {
+					ve.SetLogNumber(n)
+				}
+			case nextFileNumber:
+				if n, err := GetVarint64(src); err != nil {
+					st = NewStatus(IOError, "nextFileNumber", err.Error())
+				} else {
+					ve.SetNextFile(n)
+				}
+			case lastSequence:
+				if n, err := GetVarint64(src); err != nil {
+					st = NewStatus(IOError, "lastSequence", err.Error())
+				} else {
+					ve.SetLastSequence(SequenceNumber(n))
+				}
+			default:
+				panic(fmt.Sprintf("version edit: unknow type %v", tp))
+			}
+		}
+	}
+
+	return st
 }

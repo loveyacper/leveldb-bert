@@ -88,7 +88,12 @@ func PutVarint64(dst *bytes.Buffer, value uint64) {
 }
 
 func GetVarint32(input *bytes.Buffer) (uint32, error) {
-	value, nread := binary.Uvarint(input.Bytes()[:binary.MaxVarintLen32])
+	l := input.Len()
+	if l > binary.MaxVarintLen32 {
+		l = binary.MaxVarintLen32
+	}
+
+	value, nread := binary.Uvarint(input.Bytes()[:l])
 	if nread > 0 {
 		input.Next(nread)
 		return uint32(value), nil
@@ -100,7 +105,12 @@ func GetVarint32(input *bytes.Buffer) (uint32, error) {
 }
 
 func GetVarint64(input *bytes.Buffer) (uint64, error) {
-	value, nread := binary.Uvarint(input.Bytes()[:binary.MaxVarintLen64])
+	l := input.Len()
+	if l > binary.MaxVarintLen32 {
+		l = binary.MaxVarintLen32
+	}
+
+	value, nread := binary.Uvarint(input.Bytes()[:l])
 	if nread > 0 {
 		input.Next(nread)
 		return value, nil

@@ -7,6 +7,7 @@ package leveldb
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -20,6 +21,8 @@ const (
 	CurrentFile
 	TempFile
 	InfoLogFile
+
+	InvalidFile = 1000
 )
 
 // Return the name of the log file with the specified number
@@ -80,11 +83,43 @@ func InfoLogFileName(dbname string) string {
 	return dbname + "/LOG"
 }
 
+// Owned filenames have the form:
+//    dbname/CURRENT
+//    dbname/LOCK
+//    dbname/LOG
+//    dbname/LOG.old
+//    dbname/MANIFEST-[0-9]+
+//    dbname/[0-9]+.(log|ldb)
 // If filename is a leveldb file, store the type of the file in *type.
 // The number encoded in the filename is stored in *number.  If the
 // filename was successfully parsed, returns true.  Else return false.
-func ParseFileName(filename string) (uint64, FileType, bool) {
-	return 0, LogFile, false
+func ParseFileName(filename string) (bool, uint64, FileType) {
+	switch filename {
+	case "CURRENT":
+		return true, 0, CurrentFile
+	case "LOCK":
+		return true, 0, DBLockFile
+	case "LOG":
+		fallthrough
+	case "LOG.old":
+		return true, 0, InfoLogFile
+	default:
+		break
+	}
+
+	if strings.HasPrefix(filename, "MANIFEST-") {
+		numstr := filename[9:]
+		if num, err := strconv.Atoi(numstr); err == nil {
+			return true, uint64(num), DescriptorFile
+		}
+	} else {
+		// assume name like 000001.log
+		if num, err := strconv.Atoi(filename[:len(filename)-4]); err == nil {
+			return true, uint64(num), LogFile
+		}
+	}
+
+	return false, 0, InvalidFile
 }
 
 // Make the CURRENT file point to the descriptor file with the
