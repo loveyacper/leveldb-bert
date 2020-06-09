@@ -13,14 +13,21 @@ type DB struct {
 	options            *Options
 	name               string
 	mem                *MemTable
+	imm                *MemTable
 	internalComparator *InternalKeyComparator
 
 	writers    *list.List
-	sequence   SequenceNumber
 	writeBatch *WriteBatch
 
-	lognumber uint64
+	logNumber uint64
 	log       *LogWriter
+
+	bgCV       *sync.Cond
+	bgError    Status
+	compacting bool
+
+	//目前是单线程压缩，我觉得没有pendingOutput的必要
+	//pendingOutput map[uint64]struct {} // 保存正在minor生成的ldb文件，免得误被后台删除
 
 	versions *VersionSet
 
@@ -34,6 +41,11 @@ func NewDB(opt *Options) *DB {
 	db.writers = list.New()
 	db.writeBatch = NewWriteBatch()
 
+	db.compacting = false
+	db.bgCV = sync.NewCond(&db.Mutex)
+	db.bgError = NewStatus(OK)
+
+	db.options.Comp = db.internalComparator
 	return db
 }
 
@@ -66,18 +78,55 @@ func Open(opt *Options, dbname string) (*DB, Status) {
 	db.Lock()
 	defer db.Unlock()
 
-	db.Recover()
+	edit, st := db.Recover()
+	if st.IsOK() {
+		if edit == nil {
+			edit = &VersionEdit{} // force LogAndApply
+			//edit.SetLogNumber(db.versions.NewFileNumber()) // 3 for new db
+			edit.SetLogNumber(db.versions.LogNumber())
+		} else {
+			debug.Println("recover edit ", edit.LogNumber)
+		}
+	} else {
+		db.Close()
+		return nil, st
+	}
 
-	if lfile, st := opt.Env.NewAppendableFile(LogFileName(dbname, 1)); st.IsOK() {
-		db.lognumber = 1
+	db.logNumber = edit.LogNumber
+	debug.Println("Open db with log number ", db.logNumber)
+
+	if lfile, st := opt.Env.NewAppendableFile(LogFileName(dbname, db.logNumber)); !st.IsOK() {
+		db.Close()
+		return nil, st
+	} else {
+		//TODO 每次重启，log文件都更新。所以需要把recover的log持久化到level0
 		db.log = NewLogWriter(lfile)
+	}
+
+	if st := db.versions.LogAndApply(edit, &db.Mutex); !st.IsOK() {
+		db.Close()
+		return nil, st
+	} else {
+		db.DeleteObsoleteFiles()
 	}
 
 	return db, NewStatus(OK)
 }
 
 func (db *DB) Close() {
+	db.Lock()
+	for db.compacting {
+		db.bgCV.Wait()
+	}
+
+	if db.log != nil {
+		db.log.Close()
+		db.log = nil
+	}
+	db.Unlock()
+
 	db.options.Env.UnlockFile(db.lock)
+	resetLogger()
 }
 
 // Set the database entry for "key" to "value".  Returns OK on success,
@@ -108,24 +157,34 @@ func (db *DB) Delete(opt *WriteOptions, key []byte) Status {
 // May return some other Status on an error.
 func (db *DB) Get(opt *ReadOptions, key []byte) ([]byte, Status) {
 	snapshot := opt.Snapshot
+
 	db.Lock()
 	if snapshot > kMaxSequenceNumber {
-		snapshot = db.sequence
+		snapshot = db.versions.LastSequence()
 	}
+	mem := db.mem
+	imm := db.imm
 	db.Unlock()
 
 	lk := NewLookupKey(key, snapshot)
 	var value []byte
-	succ, status := db.mem.Get(lk, &value)
-	if status == nil {
-		debug.Fatalln("Get nil status")
+
+	succ, status := mem.Get(lk, &value)
+	debug.Printf("db.Get with snapshot %v, succ %v, status %v", snapshot, succ, status)
+	if succ {
+		return value, status
 	}
 
-	if succ && status.IsOK() {
-		return value, status
-	} else {
-		return nil, status
+	if imm != nil {
+		succ, status = imm.Get(lk, &value)
+		if succ {
+			return value, status
+		}
 	}
+
+	// TODO Get data from version
+
+	return nil, status
 }
 
 // Information kept for every waiting writer
@@ -157,8 +216,8 @@ func (db *DB) Write(opt *WriteOptions, myBatch *WriteBatch) Status {
 		return myWriter.status
 	}
 
-	status := NewStatus(OK)
-	lastSeq := db.sequence
+	status := db.makeRoomForWrite()
+	lastSeq := db.versions.LastSequence()
 	lastWriterElem := element
 
 	if status.IsOK() && myBatch != nil {
@@ -173,9 +232,8 @@ func (db *DB) Write(opt *WriteOptions, myBatch *WriteBatch) Status {
 
 		// write to wal log
 		db.log.AddRecord(updates.Contents())
-		debug.Println("insert record:", len(updates.Contents()))
+		debug.Println("insert wal log record bytes:", len(updates.Contents()))
 		if opt.Sync {
-			// sync to wal log
 			db.log.Sync()
 		}
 		// insert into memtable without db lock
@@ -187,7 +245,7 @@ func (db *DB) Write(opt *WriteOptions, myBatch *WriteBatch) Status {
 		if updates == db.writeBatch {
 			db.writeBatch.Clear()
 		}
-		db.sequence = lastSeq
+		db.versions.SetLastSequence(lastSeq)
 	}
 
 	for {
@@ -209,9 +267,9 @@ func (db *DB) Write(opt *WriteOptions, myBatch *WriteBatch) Status {
 		// 说明这个front()比我晚入队。
 		db.writers.Front().Value.(*dbWriter).cond.Signal()
 		/* 唤醒函数开头的这行代码：
-		   for !myWriter.done && element.Prev() != nil {
-		       myWriter.cond.Wait()
-		   }
+		for !myWriter.done && element.Prev() != nil {
+			myWriter.cond.Wait()
+		}
 		*/
 	}
 
@@ -274,29 +332,186 @@ func (db *DB) BuildBatchGroup(lastWriter **list.Element, mustNotBeSync bool) *Wr
 	return result
 }
 
-func (db *DB) Recover() Status {
+func (db *DB) makeRoomForWrite() Status {
+	if db.writers.Len() == 0 {
+		debug.Panicln("makeRoomForWrite but writers empty.")
+	}
+
+	st := NewStatus(OK)
+	if db.mem == nil {
+		db.mem = NewMemtable(db.internalComparator)
+	}
+
+	for {
+		if db.mem.ApproximateMemoryUsage() < db.options.WriteBufferSize {
+			break
+		} else if db.imm != nil {
+			// We have filled up the current memtable, but the previous
+			// one is still being compacted, so we wait.
+			debug.Println("Current memtable full; waiting...")
+			db.bgCV.Wait()
+		} else {
+			// Attempt to switch to a new memtable and trigger compaction of old
+			// 生成新的log文件号（binlog文件和ldb文件公用这个序号
+			debug.Println("Current memtable full; begin compact...")
+			newLogNumber := db.versions.NewFileNumber()
+			var lfile WritableFile
+			lfile, st = db.options.Env.NewWritableFile(LogFileName(db.name, newLogNumber))
+			if !st.IsOK() {
+				db.versions.ReuseFileNumber(newLogNumber)
+				break
+			}
+
+			db.logNumber = newLogNumber
+			db.log.Close()
+			db.log = NewLogWriter(lfile)
+
+			db.imm = db.mem
+			db.mem = NewMemtable(db.internalComparator)
+			db.maybeScheduleCompaction()
+		}
+	}
+
+	return st
+}
+
+func (db *DB) maybeScheduleCompaction() {
+	if db.compacting {
+		return
+	}
+
+	if !db.bgError.IsOK() {
+		return
+	}
+
+	if db.imm == nil {
+		// TODO && !versions.NeedsCompaction()
+		return
+	}
+
+	db.compacting = true
+	go db.backgroundCall()
+}
+
+func (db *DB) backgroundCall() {
+	db.Lock()
+	defer db.Unlock()
+
+	if !db.compacting {
+		debug.Panicln("compacting should be true when enter backgroundCall")
+	}
+
+	if db.imm != nil {
+		db.CompactMemTable() // minor compacting
+	} else {
+		// major compaction
+	}
+
+	db.compacting = false
+	db.maybeScheduleCompaction()
+
+	db.bgCV.Signal()
+}
+
+func (db *DB) CompactMemTable() {
+	// Save the contents of the memtable as a new Table
+	//Version* base = versions_->current();
+	s, edit := db.WriteLevel0Table(db.imm) // 将新的ldb文件记录到edit中
+
+	// Replace immutable memtable with the generated Table
+	if s.IsOK() {
+		// 在MakeRoomForWrite的时候已经刷新了logfile序号
+		// 在edit中更新了lognumber，舍弃旧的log，因为已经针对它生成了ldb文件并记录在edit。
+		edit.SetLogNumber(db.logNumber) // Earlier logs no longer needed
+		// apply edit则是一次原子更新：生成新的ldb文件并删除对应的log文件
+		debug.Println("Minor compact: evict lognum ", db.logNumber)
+		s = db.versions.LogAndApply(edit, &db.Mutex)
+	}
+
+	if s.IsOK() {
+		db.imm = nil
+		db.DeleteObsoleteFiles()
+	} else {
+		db.RecordBackgroundError(s)
+	}
+}
+
+func (db *DB) RecordBackgroundError(err Status) {
+	//mutex_.AssertHeld();
+	if db.bgError.IsOK() {
+		db.bgError = err
+		db.bgCV.Broadcast()
+	}
+}
+
+// 新的ldb文件记录到edit中
+func (db *DB) WriteLevel0Table(mem *MemTable) (Status, *VersionEdit) {
+	var edit VersionEdit
+
+	var meta FileMetaData
+	meta.Number = db.versions.NewFileNumber()
+
+	fname := TableFileName(db.name, meta.Number)
+	var builder *TableBuilder
+	if wfile, st := db.options.Env.NewWritableFile(fname); !st.IsOK() {
+		debug.Println("NewWritableFile failed: ", fname)
+		return st, nil
+	} else {
+		builder = NewTableBuilder(db.options, wfile)
+	}
+	debug.Printf("Level-0 table #%v: started", meta.Number)
+
 	s := NewStatus(OK)
+	{
+		db.Unlock()
+		// 将内存imm_有序的保存到ldb文件
+		s = BuildTable(mem, builder, &meta)
+		db.Lock()
+	}
+
+	debug.Printf("Level-0 table #%v: %v bytes %v", meta.Number, meta.FileSize, s)
+
+	// Note that if file_size is zero, the file has been deleted and
+	// should not be added to the manifest.
+	var level int = 0
+	if s.IsOK() && meta.FileSize > 0 {
+		//minUserKey := meta.Smallest.UserKey();
+		//maxUserKey := meta.Largest.UserKey();
+		// 测试一下应该加入到当前版本的那一层？
+		level = 0
+		// 记录新ldb文件的元数据
+		edit.AddFile(level, meta.Number, meta.FileSize, meta.Smallest, meta.Largest)
+	} else {
+		db.options.Env.RemoveFile(fname)
+	}
+
+	return s, &edit
+}
+
+func (db *DB) Recover() (*VersionEdit, Status) {
+	s := NewStatus(OK)
+	var edit *VersionEdit
 
 	if db.options.Env.FileExists(CurrentFileName(db.name)) {
 		if db.options.ErrorIfExists {
-			return NewStatus(InvalidArgument, db.name+" exists (error_if_exists is true)")
+			return nil, NewStatus(InvalidArgument, db.name+" exists (error_if_exists is true)")
 		}
 	} else {
 		if db.options.CreateIfMissing {
 			if s = db.initDB(db.options.Env, db.name); !s.IsOK() {
-				return s
+				return nil, s
 			}
 		} else {
-			return NewStatus(InvalidArgument, db.name+" does not exist (create_if_missing is false)")
+			return nil, NewStatus(InvalidArgument, db.name+" does not exist (create_if_missing is false)")
 		}
 	}
 
-	// 访问manifest，记录当前lognumber，next file号。并将当前manifest号码设置为next++
+	// 访问manifest，记录最小有效lognumber，next file号。
 	s = db.versions.Recover()
 
 	// 下面db则尝试根据lognumber，恢复有效的wal。leveldb恢复完成后，强制生成了ldb文件
 	// 这里我不打算生成ldb，想复用已有的wal文件。当后续接受put请求，再触发minor压缩
-	// 所以这里我不需要更新edit,leveldb更新edit，是因为新增了ldb文件，且淘汰响应的wal.log文件
+	// 所以这里我不需要更新edit,leveldb更新edit，是因为新增了ldb文件，且淘汰相应的wal.log文件
 	if s.IsOK() {
 		var maxSeq SequenceNumber
 
@@ -306,7 +521,7 @@ func (db *DB) Recover() Status {
 		minLog := db.versions.LogNumber()
 		filenames, st := db.options.Env.GetChildren(db.name)
 		if !st.IsOK() {
-			return st
+			return nil, st
 		}
 
 		logs := make([]uint64, 0)
@@ -324,7 +539,7 @@ func (db *DB) Recover() Status {
 
 		for _, n := range logs {
 			seq := db.recoverLog(n)
-			if seq > maxSeq {
+			if maxSeq < seq {
 				maxSeq = seq
 			}
 
@@ -332,6 +547,31 @@ func (db *DB) Recover() Status {
 			// records after allocating this log number.  So we manually
 			// update the file number allocation counter in VersionSet.
 			db.versions.MarkFileNumberUsed(n)
+
+			if db.mem.ApproximateMemoryUsage() >= db.options.WriteBufferSize {
+				debug.Println("after recover log begin compacting")
+
+				if st, ve := db.WriteLevel0Table(db.mem); !st.IsOK() {
+					// Reflect errors immediately so that conditions like full
+					// file-systems cause the DB::Open() to fail.
+					return nil, st
+				} else {
+					if len(ve.NewFiles) != 1 {
+						debug.Panicln("WriteLevel0Table ldb file should be 1 but ", len(ve.NewFiles))
+					}
+
+					if edit == nil {
+						edit = ve
+					} else {
+						f := ve.NewFiles[0]
+						edit.AddFile(f.Level, f.Number, f.FileSize, f.Smallest, f.Largest)
+					}
+
+					edit.LogNumber = n + 1 // old log number n is not needed
+					db.mem = nil
+					debug.Println("WriteLevel0Table evict log number ", n)
+				}
+			}
 		}
 
 		if maxSeq > db.versions.LastSequence() {
@@ -339,21 +579,35 @@ func (db *DB) Recover() Status {
 		}
 	}
 
-	return s
+	return edit, s
 }
 
 func (db *DB) recoverLog(num uint64) SequenceNumber {
 	var maxSeq SequenceNumber
 	if logf, st := db.options.Env.NewSequentialFile(LogFileName(db.name, num)); st.IsOK() {
+		if db.mem == nil {
+			db.mem = NewMemtable(db.internalComparator)
+		}
+
 		reader := NewLogReader(logf)
 		var record []byte
 		for reader.ReadRecord(&record) {
-			debug.Println("got record:", len(record))
 			wb := NewWriteBatch()
 			wb.SetContents(record)
+			debug.Printf("read log record len: %v, write count %v", len(record), wb.Count())
+			if wb.Count() == 0 {
+				debug.Panicln("Why write batch count is 0")
+			}
+
 			// insert into memtable without db lock
 			mwbp := memtableWriteBatchProcessor{memtable: db.mem}
 			wb.ForEach(&mwbp)
+
+			// calc max seq
+			endSeq := wb.Sequence() + SequenceNumber(wb.Count()-1)
+			if maxSeq < endSeq {
+				maxSeq = endSeq
+			}
 		}
 		debug.Println("recover logfile done:", LogFileName(db.name, num))
 		reader.Close()
@@ -390,7 +644,7 @@ func (db *DB) initDB(env Env, dbname string) Status {
 		if err := SetCurrentFile(db.name, 1); err != nil {
 			s = NewStatus(IOError, err.Error())
 		} else {
-			debug.Println("SetCurrentFile to ", manifest)
+			debug.Println("initDB: SetCurrentFile to ", manifest)
 		}
 	}
 
@@ -401,10 +655,70 @@ func (db *DB) initDB(env Env, dbname string) Status {
 	return s
 }
 
+func (db *DB) DeleteObsoleteFiles() {
+	if !db.bgError.IsOK() {
+		// After a background error, we don't know whether a new version may
+		// or may not have been committed, so we cannot safely garbage collect.
+		return
+	}
+
+	// Make a set of all of the live ldb files
+	live := db.versions.LiveFiles()
+
+	minLog := db.versions.LogNumber()
+	filenames, _ := db.options.Env.GetChildren(db.name) // Ignoring errors on purpose
+	for _, name := range filenames {
+		if ok, number, tp := ParseFileName(name); ok {
+			keep := true
+			switch tp {
+			case LogFile:
+				debug.Printf("logfile: my number %v, min %v", number, minLog)
+				if number < minLog {
+					keep = false
+				}
+			case DescriptorFile:
+				// Keep my manifest file, and any newer incarnations'
+				// (in case there is a race that allows other incarnations)
+				debug.Printf("manifest: my number %v, ver number %v", number, db.versions.ManifestFileNumber())
+				if number < db.versions.ManifestFileNumber() {
+					keep = false
+				}
+			case TableFile:
+				i := sort.Search(len(live), func(i int) bool {
+					return number <= live[i]
+				})
+
+				if i < len(live) && live[i] == number {
+					keep = true
+				} else {
+					keep = false
+				}
+
+				debug.Printf("keep %v: %v.ldb", keep, number)
+
+			case TempFile:
+				//TODO
+			case CurrentFile:
+				fallthrough
+			case DBLockFile:
+				fallthrough
+			case InfoLogFile:
+				keep = true
+			}
+
+			if !keep {
+				debug.Printf("Delete type=%v #%v", tp, number)
+				db.options.Env.RemoveFile(db.name + "/" + name)
+			}
+		}
+	}
+}
+
 type memtableWriteBatchProcessor struct {
 	memtable *MemTable
 }
 
 func (wbp *memtableWriteBatchProcessor) ProcessWriteBatch(seq SequenceNumber, tp ValueType, key, value []byte) {
+	debug.Printf("ProcessWriteBatch key %v, value %v, seq %v", string(key), string(value), seq)
 	wbp.memtable.Add(seq, tp, key, value)
 }

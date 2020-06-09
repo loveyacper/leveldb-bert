@@ -10,6 +10,32 @@ import (
 	"fmt"
 )
 
+// Grouping of constants.  We may want to make some of these
+// parameters set via options.
+const (
+	NumLevels int = 7
+
+	// Level-0 compaction is started when we hit this many files.
+	L0_CompactionTrigger = 4
+
+	// Soft limit on number of level-0 files.  We slow down writes at this point.
+	L0_SlowdownWritesTrigger = 8
+
+	// Maximum number of level-0 files.  We stop writes at this point.
+	L0_StopWritesTrigger = 12
+
+	// Maximum level to which a new compacted memtable is pushed if it
+	// does not create overlap.  We try to push to level 2 to avoid the
+	// relatively expensive level 0=>1 compactions and to avoid some
+	// expensive manifest file operations.  We do not push all the way to
+	// the largest level since that can generate a lot of wasted disk
+	// space if the same key space is being repeatedly overwritten.
+	MaxMemCompactLevel = 2
+
+	// Approximate gap in bytes between samples of data read during iteration.
+	ReadBytesPeriod = 1048576
+)
+
 // Value types encoded as the last component of internal keys.
 // DO NOT CHANGE THESE VALUES: they are embedded in the on-disk
 // data structures.
@@ -137,8 +163,10 @@ func NewInternalKey(userKey []byte, s SequenceNumber, t ValueType) *InternalKey 
 }
 
 func (ikey *InternalKey) DecodeFrom(s []byte) {
-	//ikey.rep = s
-	copy(ikey.rep, s)
+	if len(s) > 0 {
+		ikey.rep = make([]byte, len(s))
+		copy(ikey.rep, s)
+	}
 }
 
 func (ikey *InternalKey) Encode() []byte {

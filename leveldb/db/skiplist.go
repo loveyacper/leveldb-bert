@@ -76,7 +76,7 @@ type SkipList struct {
 	cmp    Comparator
 
 	numNode  int
-	byteSize int64 // key size + value size
+	byteSize uint64 // key size + value size
 }
 
 func NewSkipList(cmp Comparator) *SkipList {
@@ -100,7 +100,7 @@ func (sl *SkipList) NumOfNode() int {
 	return sl.numNode
 }
 
-func (sl *SkipList) ByteSize() int64 {
+func (sl *SkipList) ByteSize() uint64 {
 	return sl.byteSize
 }
 
@@ -170,7 +170,7 @@ func (sl *SkipList) Insert(key, value []byte) error {
 	}
 
 	sl.numNode++
-	sl.byteSize += int64(len(key) + len(value))
+	sl.byteSize += uint64(len(key) + len(value))
 	return nil
 }
 

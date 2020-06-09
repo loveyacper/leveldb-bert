@@ -24,3 +24,9 @@ func initLogger(out io.Writer) *log.Logger {
 
 	return debug
 }
+
+func resetLogger() {
+	if debug != nil {
+		debug = nil
+	}
+}

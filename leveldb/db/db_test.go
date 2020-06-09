@@ -32,6 +32,8 @@ func TestWrite(t *testing.T) {
 	db, _ = Open(NewCreateIfMissingOptions(), "tmpdb")
 	defer db.Close()
 
+	debug.Println("OPEN DONE---------------------------------------")
+
 	wopt := WriteOptions{}
 	ropt := NewReadOptions()
 
@@ -55,7 +57,7 @@ func TestWrite(t *testing.T) {
 
 	// Default db sequence is started at 1
 	t.Logf("Try look up for city at diff version\n")
-	for seq := 1; seq <= 5; seq++ {
+	for seq := 1; seq <= 3; seq++ {
 		ropt.Snapshot = SequenceNumber(seq)
 		value, st := db.Get(ropt, []byte("city"))
 
@@ -63,7 +65,7 @@ func TestWrite(t *testing.T) {
 		switch seq {
 		case 1, 2:
 			succ = true
-		case 3, 4, 5:
+		case 3:
 			succ = false
 		default:
 			panic("never here")
@@ -75,11 +77,14 @@ func TestWrite(t *testing.T) {
 			t.Logf("Find city at seq %d: %v\n", seq, string(value))
 		}
 	}
+	debug.Println("END ---------------------------------------")
 }
 
 func TestWriteBatch(t *testing.T) {
 	db, _ = Open(NewCreateIfMissingOptions(), "tmpdb")
 	defer db.Close()
+
+	debug.Println("OPEN DONE---------------------------------------")
 
 	wopt := WriteOptions{}
 	ropt := NewReadOptions()
@@ -109,15 +114,15 @@ func TestWriteBatch(t *testing.T) {
 
 	// Default db sequence is started at 1
 	t.Logf("Try look up for city at diff version\n")
-	for seq := 1; seq <= 5; seq++ {
+	for seq := 4; seq <= 6; seq++ {
 		ropt.Snapshot = SequenceNumber(seq)
 		value, st := db.Get(ropt, []byte("city"))
 
 		succ := true
 		switch seq {
-		case 1, 2:
+		case 4, 5:
 			succ = true
-		case 3, 4, 5:
+		case 6:
 			succ = false
 		default:
 			panic("never here")
@@ -129,6 +134,8 @@ func TestWriteBatch(t *testing.T) {
 			t.Logf("Find city at seq %d: %v\n", seq, string(value))
 		}
 	}
+
+	debug.Println("END ---------------------------------------")
 }
 
 func TestWriteLog(t *testing.T) {
@@ -164,7 +171,7 @@ func TestWriteLog(t *testing.T) {
 
 		// Default db sequence is started at 1
 		t.Logf("Try look up for city at diff version\n")
-		for seq := 1; seq <= 5; seq++ {
+		for seq := 1; seq <= 3; seq++ {
 			ropt.Snapshot = SequenceNumber(seq)
 			value, st := db.Get(ropt, []byte("city"))
 
@@ -172,7 +179,7 @@ func TestWriteLog(t *testing.T) {
 			switch seq {
 			case 1, 2:
 				succ = true
-			case 3, 4, 5:
+			case 3:
 				succ = false
 			default:
 				panic("never here")

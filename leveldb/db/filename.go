@@ -29,9 +29,9 @@ const (
 // in the db named by "dbname".  The result will be prefixed with
 // "dbname".
 func LogFileName(dbname string, number uint64) string {
-	if number <= 0 {
-		debug.Panic("log number should > 0")
-	}
+	//if number < 0 {
+	//	debug.Panic("log number should > 0")
+	//	}
 	return makeFileName(dbname, number, "log")
 }
 
@@ -113,9 +113,26 @@ func ParseFileName(filename string) (bool, uint64, FileType) {
 			return true, uint64(num), DescriptorFile
 		}
 	} else {
+		if len(filename) <= 4 {
+			return false, 0, InvalidFile
+		}
+
 		// assume name like 000001.log
 		if num, err := strconv.Atoi(filename[:len(filename)-4]); err == nil {
-			return true, uint64(num), LogFile
+			i := strings.LastIndexByte(filename, '.')
+			if i < 0 {
+				return false, 0, InvalidFile
+			}
+
+			suffix := filename[i:]
+			switch suffix {
+			case ".log":
+				return true, uint64(num), LogFile
+			case ".ldb":
+				return true, uint64(num), TableFile
+			case ".dbtmp":
+				return true, uint64(num), TempFile
+			}
 		}
 	}
 

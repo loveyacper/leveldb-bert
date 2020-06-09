@@ -22,6 +22,7 @@ func TestMain(m *testing.M) {
 var tbl *MemTable
 
 func setup() {
+	initLogger(os.Stdout)
 	log.Println("setup...")
 	comparator := NewBytewiseComparator()
 	icmp := &InternalKeyComparator{userCmp: comparator}
