@@ -112,6 +112,7 @@ func (vb *VersionBuilder) Apply(edit *VersionEdit) {
 		if vb.levels[level].deletedFiles != nil {
 			delete(vb.levels[level].deletedFiles, f.Number)
 		}
+		debug.Println("versionBuilder added file", f.Number)
 		vb.levels[level].addedFiles = append(vb.levels[level].addedFiles, f)
 	}
 }
@@ -158,17 +159,29 @@ func (vb *VersionBuilder) MaybeAddFile(v *Version, level int, f *FileMetaData) {
 		}
 	}
 
+	debug.Println("MaybeAddFile level", level, " number", f.Number)
 	v.files[level] = append(v.files[level], *f)
 }
 
 type VersionSet struct {
-	options            *Options
-	dbname             string
-	icmp               *InternalKeyComparator
-	nextFileNumber     uint64
+	options *Options
+	dbname  string
+	icmp    *InternalKeyComparator
+	// ensure file number monotonic increase
+	nextFileNumber uint64
+	// 该字段不会持久化，在recover过程中设置，用来将来WriteSnapshot()时生成新的manifest文件名
 	manifestFileNumber uint64
-	lastSequence       SequenceNumber
-	logNumber          uint64
+	/*
+	   该seq字段，仅仅在没有wal-log文件的情况下有用。比如刚刚minor压缩了memtable，且此时没有写请求，那vs这里记录的seq就有用。
+	   如果生成了新的memtable，且有数据，那么重启恢复的时候，seq是从wal里更新，因为wal里一定是最新数据，seq最大。
+	   但是注意，在minor压缩时，logAndApply所使用的VersionEdit对象，仅仅含有新生成的ldb文件和淘汰的wal文件，并没有seq。
+	   seq使用的则是vs的成员变量，这个变量会被writer线程更新的。也就是说，后台压缩线程执行写入manifest的seq并不一定是ldb文件中
+	   最大的seq，而是更大。因为有writer线程更新了seq，其对应的数据也写入了wal。
+	   总之，记录在manifest的seq只是个保底的作用，只有在wal文件为空的情况下有用。只要wal非空，在重启时执行recovery log，
+	   就会把seq更新，因为wal log中的seq一定更大。
+	*/
+	lastSequence SequenceNumber
+	logNumber    uint64
 
 	// Opened lazily
 	manifestLog *LogWriter
@@ -183,6 +196,7 @@ func NewVersionSet(dbname string, opts *Options, icmp *InternalKeyComparator) *V
 	vs.icmp = icmp
 	vs.nextFileNumber = 2
 	vs.versions = list.New()
+	debug.Println("NewVersionSet, so append a dummy version")
 	vs.AppendVersion(&Version{})
 	return vs
 }
@@ -235,11 +249,14 @@ func (vs *VersionSet) AppendVersion(v *Version) {
 
 	vs.current = v
 	vs.versions.PushBack(v)
-	debug.Println(v)
+	debug.Println("AppendVersion: ", v)
 }
 
 func (vs *VersionSet) WriteSnapshot() Status {
 	// TODO: Break up into multiple records to reduce memory usage on recovery?
+
+	debug.Println("-----> Begin versionSet.WriteSnapshot")
+	defer debug.Println("<----- End versionSet.WriteSnapshot")
 
 	// Save metadata
 	var edit VersionEdit
@@ -294,6 +311,9 @@ func (vs *VersionSet) LiveFiles() []uint64 {
 // REQUIRES: *mu is held on entry.
 // REQUIRES: no other thread concurrently calls LogAndApply()
 func (vs *VersionSet) LogAndApply(edit *VersionEdit, mu *sync.Mutex) Status {
+	debug.Println("-----> Begin versionSet.LogAndApply")
+	defer debug.Println("<----- End versionSet.LogAndApply")
+
 	if edit.HasLogNumber {
 		ln := edit.LogNumber
 		if ln < vs.logNumber || ln >= vs.nextFileNumber {
@@ -327,6 +347,8 @@ func (vs *VersionSet) LogAndApply(edit *VersionEdit, mu *sync.Mutex) Status {
 			// 当db重启的时候，执行一次rewrite，合成一个version edit记录。
 			s = vs.WriteSnapshot()
 			newManifestName = []byte(manifest)
+
+			debug.Println("New manifest file", manifest)
 		}
 	}
 	// Unlock during expensive MANIFEST log write
@@ -364,6 +386,9 @@ func (vs *VersionSet) LogAndApply(edit *VersionEdit, mu *sync.Mutex) Status {
 
 // Recover the last saved descriptor from persistent storage.
 func (vs *VersionSet) Recover() Status {
+	debug.Println("-----> Begin versionSet.Recover")
+	defer debug.Println("<----- End versionSet.Recover")
+
 	var manifestName []byte
 	if file, st := vs.options.Env.NewSequentialFile(CurrentFileName(vs.dbname)); !st.IsOK() {
 		return st
@@ -401,24 +426,25 @@ func (vs *VersionSet) Recover() Status {
 	if file, st := vs.options.Env.NewSequentialFile(vs.dbname + "/" + string(manifestName)); !st.IsOK() {
 		return st
 	} else {
-		debug.Println("Recover read manifest success:", string(manifestName))
+		debug.Println("versionRecover read manifest:", string(manifestName))
 		reader := NewLogReader(file)
 
 		var record []byte
 		for reader.ReadRecord(&record) {
-			debug.Println("VersionSet Record bytes: ", len(record))
 			var edit VersionEdit
 			if st := edit.Decode(record); st.IsOK() {
 				if edit.HasComparator && edit.Comparator != vs.icmp.userCmp.Name() {
 					s = NewStatus(InvalidArgument, edit.Comparator+" does not match: ", vs.icmp.userCmp.Name())
 				}
-				debug.Printf("Recover VersionEdit: Next %v, Log %v, LastSeq %v", edit.NextFileNumber, edit.LogNumber, edit.LastSequence)
+
+				debug.Printf("VersionSet.Recover one versionEdit: %v", edit.String())
 			}
 
 			if s.IsOK() {
 				vb.Apply(&edit)
 			}
 
+			// update info because numbers are monotonic, the newer edit will override previous
 			if edit.HasLogNumber {
 				hasLogNumber = true
 				logNumber = edit.LogNumber
@@ -455,11 +481,14 @@ func (vs *VersionSet) Recover() Status {
 		vs.AppendVersion(v)
 
 		vs.manifestFileNumber = nextFile //manifest号码只是每次重启opendb时设置，运行时不变。
-		// 这里是为了后面rewrite manifest文件留下伏笔。TODO 逻辑很割裂，这块难以看出来
+		// 这里是为了后面rewrite manifest文件留下伏笔。逻辑很割裂，这块难以看出来
+		// TODO 看能否改善下这块逻辑，跨越了几个函数，不好懂
+		// 另外，manifest文件在运行期间是不断增长的，只有重启db才会做rewrite压缩。也会导致重启db的recover过程缓慢。
+
 		vs.nextFileNumber = nextFile + 1 // nextFile被分配给manifest了，因为manifest需要一次rewrite，生成新的manifest文件
 		vs.lastSequence = lastSequence
 		vs.logNumber = logNumber
-		debug.Printf("VersionSet: manifest %v, nextFile %v, last_seq %v, log_num %v",
+		debug.Printf("VersionSet.Recover done: manifest %v, nextFile %v, last_seq %v, log_num %v",
 			vs.manifestFileNumber,
 			vs.nextFileNumber,
 			vs.lastSequence,

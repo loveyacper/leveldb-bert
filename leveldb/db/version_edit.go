@@ -24,11 +24,13 @@ type FileMetaData struct {
 
 func (f *FileMetaData) String() string {
 	buf := new(bytes.Buffer)
+	buf.WriteString("\n[")
 	buf.WriteString("Level:" + strconv.Itoa(f.Level))
 	buf.WriteString(" Number:" + strconv.Itoa(int(f.Number)))
 	buf.WriteString(" Size:" + strconv.Itoa(int(f.FileSize)))
 	buf.WriteString(" Smallest:" + string(f.Smallest.Encode()))
 	buf.WriteString(" Largest:" + string(f.Largest.Encode()))
+	buf.WriteString("]\n")
 
 	return string(buf.Bytes())
 }
@@ -53,6 +55,34 @@ type VersionEdit struct {
 
 	DeletedFiles []FileMetaData
 	NewFiles     []FileMetaData
+}
+
+func (ve *VersionEdit) String() string {
+	buf := new(bytes.Buffer)
+	buf.WriteString("\n[")
+	if ve.HasComparator {
+		buf.WriteString("Comparator:" + ve.Comparator)
+	}
+	if ve.HasLogNumber {
+		buf.WriteString(" LogNumber:" + strconv.Itoa(int(ve.LogNumber)))
+	}
+	if ve.HasNextFileNumber {
+		buf.WriteString(" NextFileNumber:" + strconv.Itoa(int(ve.NextFileNumber)))
+	}
+	if ve.HasLastSequence {
+		buf.WriteString(" LastSequence:" + strconv.Itoa(int(ve.LastSequence)))
+	}
+
+	buf.WriteString("\nDeleteFiles: ")
+	for _, f := range ve.DeletedFiles {
+		buf.WriteString(f.String())
+	}
+	buf.WriteString("\nNewFiles: ")
+	for _, f := range ve.NewFiles {
+		buf.WriteString(f.String())
+	}
+	buf.WriteString("]\n")
+	return string(buf.Bytes())
 }
 
 func (ve *VersionEdit) SetComparatorName(name string) {
@@ -166,7 +196,6 @@ func (ve *VersionEdit) Decode(input []byte) Status {
 		if tp, err := GetVarint32(src); err != nil {
 			break
 		} else {
-			debug.Println("got type ", tp)
 			switch fieldTag(tp) {
 			case comparator:
 				var cmp []byte
@@ -175,6 +204,7 @@ func (ve *VersionEdit) Decode(input []byte) Status {
 				} else {
 					ve.SetComparatorName(string(cmp))
 				}
+
 			case logNumber:
 				if n, err := GetVarint64(src); err != nil {
 					st = NewStatus(IOError, "logNumber", err.Error())
@@ -241,5 +271,6 @@ func (ve *VersionEdit) Decode(input []byte) Status {
 		}
 	}
 
+	debug.Println("Decode versionEdit", ve.String())
 	return st
 }

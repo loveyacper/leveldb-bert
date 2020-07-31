@@ -63,6 +63,8 @@ func Open(opt *Options, dbname string) (*DB, Status) {
 		initLogger(os.Stdout)
 	}
 
+	debug.Println("OpenDB: create or open dir", dbname)
+
 	db := NewDB(opt)
 	if fl, st := opt.Env.LockFile(LockFileName(dbname)); st.IsOK() {
 		db.lock = fl
@@ -78,28 +80,29 @@ func Open(opt *Options, dbname string) (*DB, Status) {
 	db.Lock()
 	defer db.Unlock()
 
+	// During recover log process, may produce new ldb files, evict old logs, so return edit
 	edit, st := db.Recover()
 	if st.IsOK() {
 		if edit == nil {
-			edit = &VersionEdit{} // force LogAndApply
-			//edit.SetLogNumber(db.versions.NewFileNumber()) // 3 for new db
+			edit = &VersionEdit{} // force LogAndApply, to trigger WriteSnapshot for manifest file
 			edit.SetLogNumber(db.versions.LogNumber())
-		} else {
-			debug.Println("recover edit ", edit.LogNumber)
 		}
+		debug.Println("db.Recover produce edit", edit.String())
 	} else {
 		db.Close()
 		return nil, st
 	}
 
 	db.logNumber = edit.LogNumber
-	debug.Println("Open db with log number ", db.logNumber)
+	debug.Println("Open db with log number", db.logNumber)
 
 	if lfile, st := opt.Env.NewAppendableFile(LogFileName(dbname, db.logNumber)); !st.IsOK() {
 		db.Close()
 		return nil, st
 	} else {
-		//TODO 每次重启，log文件都更新。所以需要把recover的log持久化到level0
+		if db.log != nil {
+			panic("db.log not nil")
+		}
 		db.log = NewLogWriter(lfile)
 	}
 
@@ -424,7 +427,7 @@ func (db *DB) CompactMemTable() {
 		// 在edit中更新了lognumber，舍弃旧的log，因为已经针对它生成了ldb文件并记录在edit。
 		edit.SetLogNumber(db.logNumber) // Earlier logs no longer needed
 		// apply edit则是一次原子更新：生成新的ldb文件并删除对应的log文件
-		debug.Println("Minor compact: evict lognum ", db.logNumber)
+		debug.Println("Minor compact: evict lognum less than", db.logNumber)
 		s = db.versions.LogAndApply(edit, &db.Mutex)
 	}
 
@@ -446,8 +449,10 @@ func (db *DB) RecordBackgroundError(err Status) {
 
 // 新的ldb文件记录到edit中
 func (db *DB) WriteLevel0Table(mem *MemTable) (Status, *VersionEdit) {
-	var edit VersionEdit
+	debug.Println("-----> Begin db.WriteLevel0Table")
+	defer debug.Println("<----- End db.WriteLevel0Table")
 
+	var edit VersionEdit
 	var meta FileMetaData
 	meta.Number = db.versions.NewFileNumber()
 
@@ -489,6 +494,9 @@ func (db *DB) WriteLevel0Table(mem *MemTable) (Status, *VersionEdit) {
 }
 
 func (db *DB) Recover() (*VersionEdit, Status) {
+	debug.Println("-----> Begin db.Recover")
+	defer debug.Println("<----- End db.Recover")
+
 	s := NewStatus(OK)
 	var edit *VersionEdit
 
@@ -510,14 +518,14 @@ func (db *DB) Recover() (*VersionEdit, Status) {
 	s = db.versions.Recover()
 
 	// 下面db则尝试根据lognumber，恢复有效的wal。leveldb恢复完成后，强制生成了ldb文件
-	// 这里我不打算生成ldb，想复用已有的wal文件。当后续接受put请求，再触发minor压缩
-	// 所以这里我不需要更新edit,leveldb更新edit，是因为新增了ldb文件，且淘汰相应的wal.log文件
+	// 这里我不打算强制生成ldb，想尽量复用已有的wal文件。当后续接受put请求，再触发minor压缩
+	// 所以这里我有可能不需要更新edit,而leveldb必定会更新edit，是因为它必定新增ldb文件，且淘汰相应的wal.log文件
 	if s.IsOK() {
 		var maxSeq SequenceNumber
 
 		// Recover from all newer log files than the ones named in the
 		// descriptor (new log files may have been added by the previous
-		// incarnation without registering them in the descriptor).
+		// incarnation without registering them in manifest).
 		minLog := db.versions.LogNumber()
 		filenames, st := db.options.Env.GetChildren(db.name)
 		if !st.IsOK() {
@@ -583,6 +591,10 @@ func (db *DB) Recover() (*VersionEdit, Status) {
 }
 
 func (db *DB) recoverLog(num uint64) SequenceNumber {
+	debug.Println("-----> Begin recoverLog:", num)
+	defer debug.Println("<----- End recoverLog:", num)
+
+	// the max seq must exists in log file, not in versionEdit
 	var maxSeq SequenceNumber
 	if logf, st := db.options.Env.NewSequentialFile(LogFileName(db.name, num)); st.IsOK() {
 		if db.mem == nil {
@@ -594,7 +606,7 @@ func (db *DB) recoverLog(num uint64) SequenceNumber {
 		for reader.ReadRecord(&record) {
 			wb := NewWriteBatch()
 			wb.SetContents(record)
-			debug.Printf("read log record len: %v, write count %v", len(record), wb.Count())
+			debug.Printf("recover log record bytes len: %v, kv count %v", len(record), wb.Count())
 			if wb.Count() == 0 {
 				debug.Panicln("Why write batch count is 0")
 			}
@@ -609,7 +621,7 @@ func (db *DB) recoverLog(num uint64) SequenceNumber {
 				maxSeq = endSeq
 			}
 		}
-		debug.Println("recover logfile done:", LogFileName(db.name, num))
+		debug.Println("done recover logfile:", LogFileName(db.name, num), "with maxseq", maxSeq)
 		reader.Close()
 	}
 
@@ -617,12 +629,15 @@ func (db *DB) recoverLog(num uint64) SequenceNumber {
 }
 
 func (db *DB) initDB(env Env, dbname string) Status {
+	debug.Println("-----> Begin initDB", dbname)
+	defer debug.Println("<----- End initDB", dbname)
+
 	s := NewStatus(OK)
 
 	var edit VersionEdit
-	edit.SetComparatorName(db.internalComparator.userCmp.Name()) // leveldb.InternalKeyComparator
-	edit.SetLogNumber(0)
-	edit.SetNextFile(2) // The first file is MANIFEST-1
+	edit.SetComparatorName(db.internalComparator.userCmp.Name()) // "leveldb.InternalKeyComparator"
+	edit.SetLogNumber(0)                                         // the .log files with number less than edit's LogNumber is obsolete
+	edit.SetNextFile(2)                                          // "The first file is MANIFEST-1"
 	edit.SetLastSequence(0)
 
 	// manifest = dbname/MANIFEST-1
@@ -656,6 +671,9 @@ func (db *DB) initDB(env Env, dbname string) Status {
 }
 
 func (db *DB) DeleteObsoleteFiles() {
+	debug.Println("-----> Begin db.DeleteObsoleteFiles")
+	defer debug.Println("<----- End db.DeleteObsoleteFiles")
+
 	if !db.bgError.IsOK() {
 		// After a background error, we don't know whether a new version may
 		// or may not have been committed, so we cannot safely garbage collect.
@@ -672,17 +690,17 @@ func (db *DB) DeleteObsoleteFiles() {
 			keep := true
 			switch tp {
 			case LogFile:
-				debug.Printf("logfile: my number %v, min %v", number, minLog)
 				if number < minLog {
 					keep = false
 				}
+				debug.Printf("find logfile %v, keep it? %v", number, keep)
 			case DescriptorFile:
 				// Keep my manifest file, and any newer incarnations'
 				// (in case there is a race that allows other incarnations)
-				debug.Printf("manifest: my number %v, ver number %v", number, db.versions.ManifestFileNumber())
 				if number < db.versions.ManifestFileNumber() {
 					keep = false
 				}
+				debug.Printf("find manifest %v, keep it? %v", number, keep)
 			case TableFile:
 				i := sort.Search(len(live), func(i int) bool {
 					return number <= live[i]
@@ -694,7 +712,7 @@ func (db *DB) DeleteObsoleteFiles() {
 					keep = false
 				}
 
-				debug.Printf("keep %v: %v.ldb", keep, number)
+				debug.Printf("find tablefile %v.ldb, keep it? %v", number, keep)
 
 			case TempFile:
 				//TODO
@@ -707,7 +725,7 @@ func (db *DB) DeleteObsoleteFiles() {
 			}
 
 			if !keep {
-				debug.Printf("Delete type=%v #%v", tp, number)
+				debug.Printf("Delete type=%v #%v, %v", tp, number, name)
 				db.options.Env.RemoveFile(db.name + "/" + name)
 			}
 		}
